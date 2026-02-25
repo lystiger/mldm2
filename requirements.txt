@@ -1,0 +1,6 @@
+pandas
+numpy
+pyserial
+opencv-python
+mediapipe
+jupyter
