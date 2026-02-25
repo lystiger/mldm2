@@ -3,4 +3,6 @@ numpy
 pyserial
 opencv-python
 mediapipe
+scikit-learn
+joblib
 jupyter

@@ -2,6 +2,7 @@ import argparse
 import csv
 import os
 import time
+import urllib.request
 
 import pandas as pd
 import serial
@@ -14,6 +15,11 @@ GLOVE_FILE = "Data/glove_dataset.csv"
 CAMERA_FILE = "Data/hand_landmarks.csv"
 FUSED_FILE = "Data/fused_dataset.csv"
 FUSE_TOLERANCE_MS = 30
+HAND_MODEL_PATH = "Data/hand_landmarker.task"
+HAND_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+    "hand_landmarker/float16/1/hand_landmarker.task"
+)
 
 
 def collect_glove_data(port, baud, num_samples, output_file):
@@ -64,6 +70,297 @@ def collect_glove_data(port, baud, num_samples, output_file):
 
     print(f"\n✅ XONG! Đã lưu thành công {num_samples} mẫu của chữ '{label}' vào file {output_file}.")
     ser.close()
+
+
+def _camera_columns():
+    return (
+        ["ts", "gesture", "L_exist", "R_exist"]
+        + [f"L_{a}{i}" for i in range(21) for a in ["x", "y", "z"]]
+        + [f"R_{a}{i}" for i in range(21) for a in ["x", "y", "z"]]
+    )
+
+
+def _extract_hand_task(hand_landmarks):
+    feat = []
+    for lm in hand_landmarks:
+        feat.extend([lm.x, lm.y, lm.z])
+    return feat
+
+
+def collect_camera_data(output_file, camera_id, model_path):
+    try:
+        import cv2
+        import mediapipe as mp
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
+    except Exception as e:
+        print(f"❌ Thiếu package camera/CV: {e}")
+        print("   Cài thêm: pip install opencv-python mediapipe")
+        return
+
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+
+    if not os.path.isfile(model_path):
+        print("⬇️ Downloading hand landmarker model...")
+        urllib.request.urlretrieve(HAND_MODEL_URL, model_path)
+
+    options = vision.HandLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=model_path),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=0.6,
+        min_hand_presence_confidence=0.6,
+        min_tracking_confidence=0.6,
+    )
+    landmarker = vision.HandLandmarker.create_from_options(options)
+
+    cap = cv2.VideoCapture(camera_id)
+    if not cap.isOpened():
+        print(f"❌ Không mở được camera id={camera_id}")
+        landmarker.close()
+        return
+
+    current_gesture = "none"
+    collecting = False
+    records = []
+
+    print(
+        "\nq : quit\n"
+        "c : toggle collect\n"
+        "1-9 : set gesture (gesture_1, gesture_2...)\n"
+    )
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        ts_ms = int(time.time() * 1000)
+
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        res = landmarker.detect_for_video(mp_image, ts_ms)
+
+        l_feat = [0.0] * 63
+        r_feat = [0.0] * 63
+        l_exist = 0
+        r_exist = 0
+
+        if res.hand_landmarks:
+            h, w = frame.shape[:2]
+            for hand_lm, handedness in zip(res.hand_landmarks, res.handedness):
+                label = handedness[0].category_name
+                feat = _extract_hand_task(hand_lm)
+
+                if label == "Left":
+                    l_feat = feat
+                    l_exist = 1
+                else:
+                    r_feat = feat
+                    r_exist = 1
+
+                for lm in hand_lm:
+                    x = int(lm.x * w)
+                    y = int(lm.y * h)
+                    cv2.circle(frame, (x, y), 2, (0, 255, 255), -1)
+
+        if collecting:
+            row = [ts_ms / 1000.0, current_gesture, l_exist, r_exist] + l_feat + r_feat
+            records.append(row)
+
+        cv2.putText(
+            frame,
+            f"Gesture: {current_gesture} | Collecting: {collecting}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0) if collecting else (0, 0, 255),
+            2,
+        )
+        cv2.imshow("CV Collector", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+        if key == ord("c"):
+            collecting = not collecting
+            print("Collecting:", collecting)
+        elif ord("1") <= key <= ord("9"):
+            current_gesture = f"gesture_{key - ord('0')}"
+            print("Gesture set:", current_gesture)
+
+    cap.release()
+    cv2.destroyAllWindows()
+    landmarker.close()
+
+    if not records:
+        print("⚠️ Không có dữ liệu camera nào được lưu (records=0).")
+        return
+
+    df = pd.DataFrame(records, columns=_camera_columns())
+    df.to_csv(output_file, index=False)
+    print(f"✅ Camera done. Saved {df.shape[0]} rows -> {output_file}")
+
+
+def collect_sync_data(port, baud, camera_id, glove_out, camera_out, model_path):
+    try:
+        import cv2
+        import mediapipe as mp
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
+    except Exception as e:
+        print(f"❌ Thiếu package camera/CV: {e}")
+        print("   Cài thêm: pip install opencv-python mediapipe")
+        return
+
+    try:
+        ser = serial.Serial(port, baud, timeout=0.05)
+        ser.reset_input_buffer()
+    except Exception as e:
+        print(f"❌ Không mở được cổng serial {port}. Lỗi: {e}")
+        return
+
+    os.makedirs(os.path.dirname(glove_out), exist_ok=True)
+    os.makedirs(os.path.dirname(camera_out), exist_ok=True)
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+
+    if not os.path.isfile(model_path):
+        print("⬇️ Downloading hand landmarker model...")
+        urllib.request.urlretrieve(HAND_MODEL_URL, model_path)
+
+    options = vision.HandLandmarkerOptions(
+        base_options=python.BaseOptions(model_asset_path=model_path),
+        running_mode=vision.RunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=0.6,
+        min_hand_presence_confidence=0.6,
+        min_tracking_confidence=0.6,
+    )
+    landmarker = vision.HandLandmarker.create_from_options(options)
+
+    cap = cv2.VideoCapture(camera_id)
+    if not cap.isOpened():
+        print(f"❌ Không mở được camera id={camera_id}")
+        landmarker.close()
+        ser.close()
+        return
+
+    current_gesture = "gesture_1"
+    collecting = False
+    cam_records = []
+    glove_records = []
+
+    print(
+        "\nq : quit\n"
+        "c : toggle collect BOTH (camera + glove)\n"
+        "1-9 : set gesture label\n"
+    )
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        ts_ms = int(time.time() * 1000)
+
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        res = landmarker.detect_for_video(mp_image, ts_ms)
+
+        l_feat = [0.0] * 63
+        r_feat = [0.0] * 63
+        l_exist = 0
+        r_exist = 0
+
+        if res.hand_landmarks:
+            h, w = frame.shape[:2]
+            for hand_lm, handedness in zip(res.hand_landmarks, res.handedness):
+                label = handedness[0].category_name
+                feat = _extract_hand_task(hand_lm)
+
+                if label == "Left":
+                    l_feat = feat
+                    l_exist = 1
+                else:
+                    r_feat = feat
+                    r_exist = 1
+
+                for lm in hand_lm:
+                    x = int(lm.x * w)
+                    y = int(lm.y * h)
+                    cv2.circle(frame, (x, y), 2, (0, 255, 255), -1)
+
+        if collecting:
+            cam_row = [ts_ms / 1000.0, current_gesture, l_exist, r_exist] + l_feat + r_feat
+            cam_records.append(cam_row)
+
+            while ser.in_waiting > 0:
+                try:
+                    line = ser.readline().decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    continue
+                if not line or any(word in line for word in ["Calibrating", "READY", "timestamp"]):
+                    continue
+                row = line.split(",")
+                if len(row) == 12:
+                    row.append(current_gesture)
+                    glove_records.append(row)
+
+        cv2.putText(
+            frame,
+            f"Gesture: {current_gesture} | Collecting: {collecting}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0) if collecting else (0, 0, 255),
+            2,
+        )
+        cv2.putText(
+            frame,
+            f"Cam rows: {len(cam_records)} | Glove rows: {len(glove_records)}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 0),
+            2,
+        )
+        cv2.imshow("Sync Collector", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+        if key == ord("c"):
+            collecting = not collecting
+            print("Collecting BOTH:", collecting)
+        elif ord("1") <= key <= ord("9"):
+            current_gesture = f"gesture_{key - ord('0')}"
+            print("Gesture set:", current_gesture)
+
+    cap.release()
+    cv2.destroyAllWindows()
+    landmarker.close()
+    ser.close()
+
+    if cam_records:
+        df_cam = pd.DataFrame(cam_records, columns=_camera_columns())
+        df_cam.to_csv(camera_out, index=False)
+        print(f"✅ Camera saved: {df_cam.shape[0]} rows -> {camera_out}")
+    else:
+        print("⚠️ Camera records = 0")
+
+    if glove_records:
+        glove_cols = [
+            "timestamp_ms", "ax", "ay", "az", "gx", "gy", "gz",
+            "f1", "f2", "f3", "f4", "f5", "label",
+        ]
+        df_glove = pd.DataFrame(glove_records, columns=glove_cols)
+        df_glove.to_csv(glove_out, index=False)
+        print(f"✅ Glove saved: {df_glove.shape[0]} rows -> {glove_out}")
+    else:
+        print("⚠️ Glove records = 0")
 
 
 def fuse_glove_with_camera(glove_file, camera_file, output_file, tolerance_ms):
@@ -130,6 +427,22 @@ def parse_args():
     collect_p.add_argument("--samples", type=int, default=NUM_SAMPLES)
     collect_p.add_argument("--out", default=GLOVE_FILE)
 
+    collect_cv_p = subparsers.add_parser("collect-cv", help="Collect camera hand landmarks.")
+    collect_cv_p.add_argument("--out", default=CAMERA_FILE)
+    collect_cv_p.add_argument("--camera-id", type=int, default=0)
+    collect_cv_p.add_argument("--model", default=HAND_MODEL_PATH)
+
+    collect_sync_p = subparsers.add_parser(
+        "collect-sync",
+        help="Collect camera landmarks + glove sensor with one toggle key.",
+    )
+    collect_sync_p.add_argument("--port", default=PORT)
+    collect_sync_p.add_argument("--baud", type=int, default=BAUD)
+    collect_sync_p.add_argument("--camera-id", type=int, default=0)
+    collect_sync_p.add_argument("--glove-out", default=GLOVE_FILE)
+    collect_sync_p.add_argument("--camera-out", default=CAMERA_FILE)
+    collect_sync_p.add_argument("--model", default=HAND_MODEL_PATH)
+
     fuse_p = subparsers.add_parser("fuse", help="Fuse glove CSV with camera CSV by timestamp.")
     fuse_p.add_argument("--glove", default=GLOVE_FILE)
     fuse_p.add_argument("--camera", default=CAMERA_FILE)
@@ -143,6 +456,17 @@ def main():
     args = parse_args()
     if args.mode == "collect":
         collect_glove_data(args.port, args.baud, args.samples, args.out)
+    elif args.mode == "collect-cv":
+        collect_camera_data(args.out, args.camera_id, args.model)
+    elif args.mode == "collect-sync":
+        collect_sync_data(
+            args.port,
+            args.baud,
+            args.camera_id,
+            args.glove_out,
+            args.camera_out,
+            args.model,
+        )
     elif args.mode == "fuse":
         fuse_glove_with_camera(args.glove, args.camera, args.out, args.tol_ms)
 
