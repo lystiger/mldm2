@@ -37,7 +37,7 @@ def sliding_window(df, window_size, step_size):
 if __name__ == "__main__":
     # 1. Đọc file CSV cậu vừa thu thập được
     try:
-        df = pd.read_csv('glove_dataset.csv')
+        df = pd.read_csv('data/raw/glove_dataset.csv')
     except FileNotFoundError:
         print("Chưa có file data. Hãy tạo dummy data để test...")
         # Tạo data giả để chạy thử script

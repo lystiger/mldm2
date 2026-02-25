@@ -1,6 +1,8 @@
 /venv
 /.venv
-
+__pycache__/
 *.pyc
 
-/Data
+/data/raw/
+/data/processed/
+/data/models/

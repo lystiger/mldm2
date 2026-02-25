@@ -11,11 +11,11 @@ import serial
 PORT = "/dev/ttyACM0"  # Nhớ đổi lại đúng cổng trên máy Linux
 BAUD = 115200
 NUM_SAMPLES = 100      # Thu 100 mẫu mỗi lần
-GLOVE_FILE = "Data/glove_dataset.csv"
-CAMERA_FILE = "Data/hand_landmarks.csv"
-FUSED_FILE = "Data/fused_dataset.csv"
+GLOVE_FILE = "data/raw/glove_dataset.csv"
+CAMERA_FILE = "data/raw/hand_landmarks.csv"
+FUSED_FILE = "data/processed/fused_dataset.csv"
 FUSE_TOLERANCE_MS = 30
-HAND_MODEL_PATH = "Data/hand_landmarker.task"
+HAND_MODEL_PATH = "data/models/hand_landmarker.task"
 HAND_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/1/hand_landmarker.task"
@@ -369,7 +369,7 @@ def fuse_glove_with_camera(glove_file, camera_file, output_file, tolerance_ms):
         return
     if not os.path.isfile(camera_file):
         print(f"❌ Không tìm thấy file camera: {camera_file}")
-        print("   Hãy export từ notebook vào Data/hand_landmarks.csv rồi chạy lại mode fuse.")
+        print("   Hãy export từ notebook vào data/raw/hand_landmarks.csv rồi chạy lại mode fuse.")
         return
 
     df_glove = pd.read_csv(glove_file)
